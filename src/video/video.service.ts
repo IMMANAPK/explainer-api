@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { exec } from 'child_process';
-import * as fs from 'fs';
 import { Video, VideoDocument } from './video.schema';
 
 @Injectable()
@@ -11,9 +10,6 @@ export class VideoService {
     @InjectModel(Video.name) private videoModel: Model<VideoDocument>
   ) {}
 
-  private configPath = 'D:/avatar-explainer/config.json';
-  private scriptDir = 'D:/avatar-explainer';
-
   async generateVideo(body: {
     text: string;
     language: string;
@@ -21,67 +17,45 @@ export class VideoService {
     title: string;
     font: string;
   }) {
-    // Update config.json
-    const config = {
-      text: body.text,
-      language: body.language,
-      voice: body.voice,
-      title: body.title,
-      font: body.font,
-      fps: 30,
-      width: 1920,
-      height: 1080,
-    };
-
-    fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf-8');
-
-    // Run python script
     return new Promise((resolve, reject) => {
-      exec(
-        'py generate-audio.py',
-        { cwd: this.scriptDir },
-        async (error, stdout, stderr) => {
-          if (error) {
-            reject({ success: false, error: stderr });
-          } else {
-            // Read duration from timestamps.json
-            const timestamps = JSON.parse(
-              fs.readFileSync('D:/avatar-explainer/public/timestamps.json', 'utf-8')
-            );
+      // Pass text and voice as arguments to python script
+      const command = `python3 generate-audio.py "${body.text.replace(/"/g, '\\"')}" "${body.voice}"`;
 
-            // Save to MongoDB
-            const video = new this.videoModel({
-              title: body.title,
-              text: body.text,
-              language: body.language,
-              voice: body.voice,
-              font: body.font,
-              duration: timestamps.duration,
-              status: 'generated',
-            });
-            await video.save();
-            console.log('Video saved to MongoDB!');
+      exec(command, { cwd: '/app' }, async (error, stdout, stderr) => {
+        if (error) {
+          console.error('Python error:', stderr);
+          reject({ success: false, error: stderr });
+          return;
+        }
 
-            resolve({ success: true, message: stdout, videoId: video._id });
-          }
-        },
-      );
-    });
-  }
+        try {
+          const result = JSON.parse(stdout.trim());
 
-  async renderVideo() {
-    return new Promise((resolve, reject) => {
-      exec(
-        'npx remotion render ExplainerVideo output/explainer.mp4 --public-dir public',
-        { cwd: this.scriptDir },
-        (error, stdout, stderr) => {
-          if (error) {
-            reject({ success: false, error: stderr });
-          } else {
-            resolve({ success: true, message: 'MP4 rendered!' });
-          }
-        },
-      );
+          // Save to MongoDB
+          const video = new this.videoModel({
+            title: body.title,
+            text: body.text,
+            language: body.language,
+            voice: body.voice,
+            font: body.font,
+            duration: result.duration,
+            audioUrl: result.audioUrl,
+            words: result.words,
+            status: 'generated',
+          });
+          await video.save();
+
+          resolve({
+            success: true,
+            duration: result.duration,
+            audioUrl: result.audioUrl,
+            words: result.words,
+            videoId: video._id,
+          });
+        } catch (e) {
+          reject({ success: false, error: 'JSON parse error: ' + stdout });
+        }
+      });
     });
   }
 
